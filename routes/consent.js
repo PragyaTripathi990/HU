@@ -128,8 +128,38 @@ router.post('/initiate', async (req, res) => {
 });
 
 /**
+ * GET /internal/aa/consents/request/:request_id
+ * Get consent request by request_id
+ */
+router.get('/request/:request_id', async (req, res) => {
+  try {
+    const { request_id } = req.params;
+
+    const consent = await consentService.getConsentByRequestId(request_id);
+
+    if (!consent) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consent request not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: consent
+    });
+  } catch (error) {
+    console.error('Error fetching consent by request_id:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+/**
  * GET /internal/aa/consents/:id
- * Get consent request by ID
+ * Get consent request by MongoDB ID
  */
 router.get('/:id', async (req, res) => {
   try {

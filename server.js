@@ -27,6 +27,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/internal/aa/consents', require('./routes/consent'));
 app.use('/internal/aa/transactions', require('./routes/transactions'));
+app.use('/webhooks', require('./routes/webhookRoutes'));
 
 // 404 handler
 app.use((req, res) => {
