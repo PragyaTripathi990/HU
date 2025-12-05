@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { TSPToken, Error } = require('../../models');
+const { TSPToken } = require('../../models');
 
 /**
  * TSP Authentication Service
@@ -72,16 +72,15 @@ class TSPAuthService {
     } catch (error) {
       console.error('❌ Login failed:', error.message);
       
-      // Log error to database
-      await Error.create({
+      // Error logging (Error model not implemented yet)
+      console.error('Error details:', {
         context: 'LOGIN',
         error_category: error.response?.status === 403 || error.response?.status === 401 
           ? 'AUTHENTICATION' 
           : 'INFRA_NETWORK',
         error_message: error.message,
         http_status_code: error.response?.status || null,
-        raw_response: error.response?.data || null,
-        is_retryable: !error.response || error.response?.status >= 500
+        raw_response: error.response?.data || null
       });
 
       return {
@@ -146,16 +145,15 @@ class TSPAuthService {
     } catch (error) {
       console.error('❌ Token refresh failed:', error.message);
 
-      // Log error
-      await Error.create({
+      // Error logging (Error model not implemented yet)
+      console.error('Error details:', {
         context: 'REFRESH_TOKEN',
         error_category: error.response?.status === 403 || error.response?.status === 401
           ? 'AUTHENTICATION'
           : 'INFRA_NETWORK',
         error_message: error.message,
         http_status_code: error.response?.status || null,
-        raw_response: error.response?.data || null,
-        is_retryable: !error.response || error.response?.status >= 500
+        raw_response: error.response?.data || null
       });
 
       // If refresh fails, we need to login again

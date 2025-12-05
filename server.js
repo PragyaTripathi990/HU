@@ -25,8 +25,8 @@ app.get('/health', (req, res) => {
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
-
-// More routes will be added here as we build them
+app.use('/internal/aa/consents', require('./routes/consent'));
+app.use('/internal/aa/transactions', require('./routes/transactions'));
 
 // 404 handler
 app.use((req, res) => {

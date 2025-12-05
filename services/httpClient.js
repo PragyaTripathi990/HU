@@ -1,126 +1,127 @@
 const axios = require('axios');
-const tspAuth = require('./auth/tspAuth');
+const tokenService = require('./auth/tokenService');
 
 /**
- * HTTP Client with automatic token injection and retry logic
- * Automatically handles token refresh on 403 errors
+ * HTTP Client with Automatic Token Management
+ * Uses axios interceptors to automatically attach Bearer tokens
+ * Handles 401 Unauthorized by auto-refreshing tokens
  */
 class SaafeHTTPClient {
   constructor() {
     this.baseURL = process.env.SAAFE_API_BASE_URL || 'https://uat.tsp.api.saafe.tech';
+    
+    // Create axios instance
     this.client = axios.create({
       baseURL: this.baseURL,
-      timeout: 15000, // 15 seconds timeout
+      timeout: 30000, // 30 seconds timeout
       headers: {
         'Content-Type': 'application/json'
       }
     });
-  }
 
-  /**
-   * Make HTTP request with automatic token injection and retry on 403
-   */
-  async request(config) {
-    try {
-      // Get valid token
-      const token = await tspAuth.getValidToken();
-
-      // Add Authorization header
-      const requestConfig = {
-        ...config,
-        headers: {
-          ...config.headers,
-          'Authorization': `Bearer ${token}`
-        }
-      };
-
-      // Make the request
-      const response = await this.client.request(requestConfig);
-      return response;
-
-    } catch (error) {
-      // Handle 403 Forbidden (token expired)
-      if (error.response?.status === 403) {
-        console.log('🔄 Got 403 error, refreshing token and retrying...');
-        
-        // Try to refresh token
-        const refreshResult = await tspAuth.refreshToken();
-        
-        if (refreshResult.success) {
-          // Retry the original request once
-          try {
-            const retryConfig = {
-              ...config,
-              headers: {
-                ...config.headers,
-                'Authorization': `Bearer ${refreshResult.token}`
-              }
-            };
-            return await this.client.request(retryConfig);
-          } catch (retryError) {
-            console.error('❌ Retry after refresh also failed:', retryError.message);
-            throw retryError;
-          }
-        } else {
-          // Refresh failed, try full login
-          console.log('🔄 Refresh failed, attempting full login...');
-          const loginResult = await tspAuth.login();
+    // Request interceptor: Add Bearer token to every request
+    this.client.interceptors.request.use(
+      async (config) => {
+        try {
+          // Get valid token (auto-login if needed)
+          const token = await tokenService.getToken();
           
-          if (loginResult.success) {
-            // Retry with new token
-            try {
-              const retryConfig = {
-                ...config,
-                headers: {
-                  ...config.headers,
-                  'Authorization': `Bearer ${loginResult.token}`
-                }
-              };
-              return await this.client.request(retryConfig);
-            } catch (retryError) {
-              console.error('❌ Retry after login also failed:', retryError.message);
-              throw retryError;
-            }
-          } else {
-            throw new Error('Failed to authenticate after 403 error');
+          // Add Authorization header
+          config.headers.Authorization = `Bearer ${token}`;
+          
+          return config;
+        } catch (error) {
+          console.error('❌ Error getting token for request:', error.message);
+          return Promise.reject(error);
+        }
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
+    // Response interceptor: Handle 401 Unauthorized
+    this.client.interceptors.response.use(
+      (response) => {
+        // Success response, return as-is
+        return response;
+      },
+      async (error) => {
+        const originalRequest = error.config;
+
+        // Handle 401 Unauthorized
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+          
+          console.log('🔄 Got 401 Unauthorized, refreshing token and retrying...');
+          
+          try {
+            // Clear token cache and get new token
+            tokenService.clearCache();
+            const newToken = await tokenService.getToken();
+            
+            // Update Authorization header
+            originalRequest.headers.Authorization = `Bearer ${newToken}`;
+            
+            // Retry the original request
+            return this.client.request(originalRequest);
+          } catch (refreshError) {
+            console.error('❌ Failed to refresh token after 401:', refreshError.message);
+            return Promise.reject(refreshError);
           }
         }
-      }
 
-      // Re-throw other errors
-      throw error;
-    }
+        // Handle 403 Forbidden (also try refresh)
+        if (error.response?.status === 403 && !originalRequest._retry) {
+          originalRequest._retry = true;
+          
+          console.log('🔄 Got 403 Forbidden, refreshing token and retrying...');
+          
+          try {
+            tokenService.clearCache();
+            const newToken = await tokenService.getToken();
+            originalRequest.headers.Authorization = `Bearer ${newToken}`;
+            return this.client.request(originalRequest);
+          } catch (refreshError) {
+            console.error('❌ Failed to refresh token after 403:', refreshError.message);
+            return Promise.reject(refreshError);
+          }
+        }
+
+        // For other errors, reject as-is
+        return Promise.reject(error);
+      }
+    );
   }
 
   /**
    * GET request
    */
   async get(url, config = {}) {
-    return this.request({ ...config, method: 'GET', url });
+    return this.client.get(url, config);
   }
 
   /**
    * POST request
    */
   async post(url, data, config = {}) {
-    return this.request({ ...config, method: 'POST', url, data });
+    return this.client.post(url, data, config);
   }
 
   /**
    * PUT request
    */
   async put(url, data, config = {}) {
-    return this.request({ ...config, method: 'PUT', url, data });
+    return this.client.put(url, data, config);
   }
 
   /**
    * DELETE request
    */
   async delete(url, config = {}) {
-    return this.request({ ...config, method: 'DELETE', url });
+    return this.client.delete(url, config);
   }
 }
 
 // Export singleton instance
 module.exports = new SaafeHTTPClient();
-

@@ -1,0 +1,28 @@
+{
+  "customer_details": {
+    "date_of_birth": "1990-01-01",
+    "mobile_number": "9876543210",
+    "email": "user@email.com",
+    "pan_number": "ABCDE1234F"
+  },
+  "consent_details": [
+    {
+      "consent_start": "2025-12-05",
+      "consent_expiry": "2026-06-05",
+      "consent_mode": "STORE",
+      "consent_types": ["PROFILE", "SUMMARY", "TRANSACTIONS"],
+      "fetch_type": "PERIODIC",
+      "fi_types": ["DEPOSIT", "TERM_DEPOSIT"],
+      "purpose_code": "102",
+      "fi_datarange_unit": "MONTH",
+      "fi_datarange_value": 3,
+      "fi_datarange_from": "2025-09-05",
+      "fi_datarange_to": "2025-12-05",
+      "frequency_unit": "MONTH",
+      "frequency_value": 1
+    }
+  ],
+  "txn_callback_url": "https://webhook.site/your-unique-url",
+  "consent_callback_url": "https://webhook.site/your-unique-url"
+}
+
