@@ -11,6 +11,10 @@ const reportSchema = new mongoose.Schema({
     unique: true,
     index: true
   },
+  internal_user_id: {
+    type: String,
+    index: true
+  },
   request_id: {
     type: mongoose.Schema.Types.Mixed,
     index: true
@@ -29,6 +33,11 @@ const reportSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: null
     // Stores full JSON report when report_type is JSON
+  },
+  report_data: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+    // Alias for json_data for compatibility
   },
   file_path: {
     type: String,
