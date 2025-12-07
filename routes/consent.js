@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const consentService = require('../services/consent/consentService');
+// CRITICAL: Import model directly (do not rely on mongoose.models)
+const ConsentRequest = require('../models/ConsentRequest');
 
 /**
  * POST /internal/aa/consents/initiate
@@ -130,26 +132,83 @@ router.post('/initiate', async (req, res) => {
 /**
  * GET /internal/aa/consents/request/:request_id
  * Get consent request by request_id
+ * NOTE: This route must come before /recent to avoid route conflicts
  */
 router.get('/request/:request_id', async (req, res) => {
   try {
     const { request_id } = req.params;
+    
+    // CRITICAL: Force conversion to Number to match the DB type
+    const reqId = Number(req.params.request_id);
+    
+    // Verify it's a valid number before querying
+    if (isNaN(reqId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid Request ID"
+      });
+    }
+    
+    console.log(`📥 GET /internal/aa/consents/request/${request_id}`);
+    console.log(`   Received request_id: "${request_id}" (Type: ${typeof request_id})`);
+    console.log(`   Parsed as Number: ${reqId} (Type: ${typeof reqId})`);
+    
+    // CRITICAL: Log the specific query being made
+    console.log(`🔍 Querying DB for:`, { request_id: reqId });
 
-    const consent = await consentService.getConsentByRequestId(request_id);
+    const consent = await consentService.getConsentByRequestId(reqId);
 
     if (!consent) {
+      console.log(`❌ Consent request not found for request_id: ${reqId}`);
       return res.status(404).json({
         success: false,
         error: 'Consent request not found'
       });
     }
 
+    console.log(`✅ Found consent request: _id=${consent._id}, request_id=${consent.request_id}, status=${consent.status}`);
+    
     return res.status(200).json({
       success: true,
       data: consent
     });
   } catch (error) {
     console.error('Error fetching consent by request_id:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * GET /internal/aa/consents/recent
+ * Get most recent consent request (for success page)
+ * NOTE: Must come before /:id to avoid route conflicts
+ */
+router.get('/recent', async (req, res) => {
+  try {
+    const { internal_user_id } = req.query;
+    
+    console.log(`📥 GET /internal/aa/consents/recent${internal_user_id ? `?internal_user_id=${internal_user_id}` : ''}`);
+    
+    const consent = await consentService.getMostRecentConsent(internal_user_id);
+
+    if (!consent) {
+      return res.status(404).json({
+        success: false,
+        error: 'No consent request found'
+      });
+    }
+
+    console.log(`✅ Found recent consent: request_id=${consent.request_id}, status=${consent.status}`);
+
+    return res.status(200).json({
+      success: true,
+      data: consent
+    });
+  } catch (error) {
+    console.error('Error fetching recent consent:', error);
     return res.status(500).json({
       success: false,
       error: error.message || 'Internal server error'
