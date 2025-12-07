@@ -11,7 +11,7 @@ const consentRequestSchema = new mongoose.Schema({
     index: true
   },
   request_id: {
-    type: mongoose.Schema.Types.Mixed, // Can be number or string
+    type: Number,
     required: true,
     unique: true,
     index: true

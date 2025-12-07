@@ -18,8 +18,10 @@ const {
 class ConsentService {
   constructor() {
     this.baseURL = process.env.SAAFE_API_BASE_URL || 'https://uat.tsp.api.saafe.tech';
-    this.txnCallbackUrl = process.env.TXN_CALLBACK_URL || `${process.env.BASE_URL || 'http://localhost:3000'}/webhooks/aa/txn`;
-    this.consentCallbackUrl = process.env.CONSENT_CALLBACK_URL || `${process.env.BASE_URL || 'http://localhost:3000'}/webhooks/aa/consent`;
+    this.txnCallbackUrl = process.env.TXN_CALLBACK_URL || `${process.env.BASE_URL || 'http://localhost:3001'}/webhooks/aa/txn`;
+    // Frontend success page URL - Saafe will redirect here after consent approval
+    // Use port 3004 if that's where your frontend is running
+    this.consentCallbackUrl = process.env.CONSENT_CALLBACK_URL || `${process.env.FRONTEND_URL || 'http://localhost:3004'}/success`;
   }
 
   /**
@@ -114,7 +116,6 @@ class ConsentService {
    */
   buildConsentDetails(input) {
     const {
-      fi_types,
       consent_start_date,
       consent_expiry_date,
       fi_datarange_unit = 'MONTH',
@@ -125,20 +126,14 @@ class ConsentService {
       consent_mode = 'STORE',
       consent_types = ['PROFILE', 'SUMMARY', 'TRANSACTIONS'],
       fetch_type = 'PERIODIC', // Always PERIODIC per requirements
-      frequency_unit = 'MONTH',
-      frequency_value = 1,
-      data_life_unit,
-      data_life_value
     } = input;
 
-    // Validate FI types (mandatory)
-    if (!fi_types || !Array.isArray(fi_types) || fi_types.length === 0) {
-      throw new Error('fi_types is mandatory and must be a non-empty array');
-    }
-    const fiTypesValidation = validateFITypes(fi_types);
-    if (!fiTypesValidation.valid) {
-      throw new Error(fiTypesValidation.error);
-    }
+    // HARDCODED WORKING PARAMETERS (verified in Postman)
+    const fi_types = ["DEPOSIT"]; // Do not allow other types
+    const frequency_unit = "MONTH"; // CRITICAL: "DAY" causes errors
+    const frequency_value = 4; // CRITICAL: 100 causes errors
+    const data_life_unit = "DAY";
+    const data_life_value = 1;
 
     // Calculate dates
     const consentStart = consent_start_date || this.calculateConsentStart();
@@ -184,10 +179,10 @@ class ConsentService {
       fi_datarange_value: fi_datarange_value || 3,
       fi_datarange_from: dataRangeFrom,
       fi_datarange_to: dataRangeTo,
-      data_life_unit: data_life_unit || "DAY",
-      data_life_value: data_life_value !== undefined ? data_life_value : 1,
-      frequency_unit: frequency_unit || "MONTH",
-      frequency_value: frequency_value || 1
+      data_life_unit: data_life_unit, // Hardcoded above
+      data_life_value: data_life_value, // Hardcoded above
+      frequency_unit: frequency_unit, // Hardcoded above
+      frequency_value: frequency_value // Hardcoded above
     };
 
     // Only add fair_use_id if provided
@@ -273,14 +268,8 @@ class ConsentService {
     }
 
     // CRITICAL: Do NOT send fip_id - it causes errors
-    // Only include if explicitly provided and user understands the risk
-    // if (input.fip_id && Array.isArray(input.fip_id) && input.fip_id.length > 0) {
-    //   const fipIdValidation = validateFIPIds(input.fip_id);
-    //   if (!fipIdValidation.valid) {
-    //     throw new Error(fipIdValidation.error);
-    //   }
-    //   payload.fip_id = input.fip_id;
-    // }
+    // User must select "Ignosis" manually in the Saafe UI
+    // fip_id is intentionally removed/undefined to let user select manually
 
     // Optional callback URLs (use defaults if not provided)
     if (input.txn_callback_url) {
@@ -349,33 +338,55 @@ class ConsentService {
         const data = response.data.data;
         
         // Extract response fields
-        const requestId = Array.isArray(data.request_id) ? data.request_id[0] : data.request_id;
+        let requestId = Array.isArray(data.request_id) ? data.request_id[0] : data.request_id;
         const txnId = Array.isArray(data.txn_id) ? data.txn_id[0] : data.txn_id;
         const consentHandle = data.consent_handle;
         const vua = data.vua;
         const redirectUrl = data.url;
 
+        // CRITICAL: Convert request_id to Number (required by schema)
+        requestId = typeof requestId === 'string' ? parseInt(requestId, 10) : Number(requestId);
+        
+        if (isNaN(requestId)) {
+          throw new Error(`Invalid request_id received from Saafe API: ${data.request_id}`);
+        }
+
         console.log('✅ Consent generated successfully!');
-        console.log(`   Request ID: ${requestId}`);
+        console.log(`   Request ID: ${requestId} (Type: ${typeof requestId})`);
         console.log(`   Transaction ID: ${txnId}`);
         console.log(`   Consent Handle: ${consentHandle}`);
 
-        // Store in database
-        const consentRequest = await ConsentRequest.create({
-          internal_user_id: input.internal_user_id,
-          request_id: requestId,
-          txn_id: txnId,
-          consent_handle: consentHandle,
-          vua: vua,
-          status: 'PENDING',
-          redirect_url: redirectUrl,
-          customer_details: saafePayload.customer_details,
-          consent_details: saafePayload.consent_details,
-          raw_request: saafePayload,
-          raw_response: response.data
-        });
-
-        console.log('💾 Consent request stored in database');
+        // CRITICAL: Log before saving to DB
+        console.log(`💾 Saving Request ${requestId} to DB...`);
+        
+        // CRITICAL: Store in database - MUST await and handle errors
+        let consentRequest;
+        try {
+          consentRequest = await ConsentRequest.create({
+            internal_user_id: input.internal_user_id,
+            request_id: requestId, // Now guaranteed to be Number
+            txn_id: txnId,
+            consent_handle: consentHandle,
+            vua: vua,
+            status: 'PENDING',
+            redirect_url: redirectUrl,
+            customer_details: saafePayload.customer_details,
+            consent_details: saafePayload.consent_details,
+            raw_request: saafePayload,
+            raw_response: response.data
+          });
+          
+          console.log(`✅ Consent request saved to DB successfully!`);
+          console.log(`   MongoDB _id: ${consentRequest._id}`);
+          console.log(`   request_id: ${consentRequest.request_id} (Type: ${typeof consentRequest.request_id})`);
+        } catch (dbError) {
+          console.error('❌ CRITICAL: Failed to save consent request to database!');
+          console.error('❌ DB Error:', dbError.message);
+          console.error('❌ DB Error Stack:', dbError.stack);
+          
+          // CRITICAL: Throw error so API fails - don't return success if DB save failed
+          throw new Error(`Database save failed: ${dbError.message}. Consent was generated but not saved.`);
+        }
 
         return {
           success: true,
@@ -470,14 +481,63 @@ class ConsentService {
   }
 
   /**
-   * Get consent request by request ID
+   * Get most recent consent request (for success page fallback)
    */
-  async getConsentByRequestId(requestId) {
+  async getMostRecentConsent(internalUserId = null) {
     try {
-      const consent = await ConsentRequest.findOne({ request_id: requestId });
+      console.log(`🔍 Finding most recent consent${internalUserId ? ` for user: ${internalUserId}` : ''}`);
+      
+      const query = internalUserId ? { internal_user_id: internalUserId } : {};
+      const consent = await ConsentRequest.findOne(query)
+        .sort({ createdAt: -1 })
+        .limit(1);
+      
+      if (consent) {
+        console.log(`   ✅ Found consent: request_id=${consent.request_id}, status=${consent.status}`);
+      } else {
+        console.log(`   ❌ No consent found`);
+      }
+      
       return consent;
     } catch (error) {
-      console.error('Error fetching consent by request_id:', error.message);
+      console.error('Error fetching most recent consent:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get consent request by request ID
+   * CRITICAL: request_id is now always Number in schema, so we query as Number
+   */
+  async getConsentByRequestId(requestId) {
+    console.log(`🔍 Checking DB for request_id: ${requestId} (Type: ${typeof requestId})`);
+    try {
+      // CRITICAL: Convert to Number (schema expects Number)
+      const numRequestId = typeof requestId === 'string' ? parseInt(requestId, 10) : Number(requestId);
+      
+      if (isNaN(numRequestId)) {
+        console.error(`❌ Invalid request_id: ${requestId} (cannot convert to number)`);
+        return null;
+      }
+      
+      console.log(`🔍 Querying DB with Number: ${numRequestId} (Type: ${typeof numRequestId})`);
+      
+      // Query as Number (schema definition)
+      const consent = await ConsentRequest.findOne({ request_id: numRequestId });
+
+      if (consent) {
+        console.log(`✅ Found consent request: _id=${consent._id}, request_id=${consent.request_id} (Type: ${typeof consent.request_id}), status=${consent.status}`);
+      } else {
+        console.log(`❌ Consent request not found in DB for request_id: ${numRequestId}`);
+        // Debug: Check if there are any consents in DB
+        const count = await ConsentRequest.countDocuments();
+        console.log(`   Total consent requests in DB: ${count}`);
+      }
+      
+      return consent;
+    } catch (error) {
+      console.error('❌ Error fetching consent by request_id:', error.message);
+      console.error('❌ Error stack:', error.stack);
       throw error;
     }
   }
@@ -549,7 +609,17 @@ class ConsentService {
         console.log(`   Status codes found: ${txnStatusArray.length}`);
 
         // Find the consent request in database
-        const consentRequest = await ConsentRequest.findOne({ request_id: requestId });
+        // Convert requestId to number if it's a string (for consistent querying)
+        let searchRequestId = requestId;
+        if (typeof requestId === 'string' && !isNaN(requestId) && requestId.trim() !== '') {
+          searchRequestId = Number(requestId);
+        }
+        
+        // Try number first, then string as fallback
+        let consentRequest = await ConsentRequest.findOne({ request_id: searchRequestId });
+        if (!consentRequest && typeof requestId === 'string') {
+          consentRequest = await ConsentRequest.findOne({ request_id: requestId });
+        }
         
         if (!consentRequest) {
           console.warn(`⚠️ Consent request not found in database for request_id: ${requestId}`);

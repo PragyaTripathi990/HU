@@ -68,6 +68,33 @@ router.post('/aa/txn', async (req, res) => {
 });
 
 /**
+ * GET /webhooks/aa/consent
+ * Handle redirect from Saafe after consent approval
+ * Redirects to frontend success page with request_id
+ */
+router.get('/aa/consent', async (req, res) => {
+  try {
+    const requestId = req.query.request_id || req.query.requestId;
+    const consentHandle = req.query.consent_handle || req.query.consentHandle;
+    
+    console.log('🔄 Redirect from Saafe received');
+    console.log(`   request_id: ${requestId}`);
+    console.log(`   consent_handle: ${consentHandle}`);
+    
+    // Redirect to frontend success page
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3004';
+    const redirectUrl = `${frontendUrl}/success${requestId ? `?request_id=${requestId}` : ''}${consentHandle ? `&consent_handle=${consentHandle}` : ''}`;
+    
+    console.log(`   Redirecting to: ${redirectUrl}`);
+    return res.redirect(redirectUrl);
+  } catch (error) {
+    console.error('Error handling redirect:', error);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    return res.redirect(`${frontendUrl}/success`);
+  }
+});
+
+/**
  * POST /webhooks/aa/consent
  * Consent status webhook from Saafe
  * Handles consent-specific updates (PAUSED, REVOKED, etc.)
