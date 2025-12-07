@@ -26,6 +26,7 @@ const ConsentDashboard = () => {
   const [retrievingReport, setRetrievingReport] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [reportId, setReportId] = useState(null);
+  const [autoRetrieveTriggered, setAutoRetrieveTriggered] = useState(false);
   
   // BSA Analysis data
   const [bsaTrackingId, setBsaTrackingId] = useState(null);
@@ -115,7 +116,9 @@ const ConsentDashboard = () => {
       setRequestId(state.requestId || null);
       setStatus(state.status || 'PENDING');
       setRedirectUrl(state.redirectUrl || null);
-      setFiTxnId(state.fiTxnId || null);
+      // Ensure fiTxnId is a string
+      const savedTxnId = state.fiTxnId;
+      setFiTxnId(savedTxnId && typeof savedTxnId === 'string' ? savedTxnId : (savedTxnId ? String(savedTxnId) : null));
       setReportId(state.reportId || null);
       setBsaTrackingId(state.bsaTrackingId || null);
       setBsaStatus(state.bsaStatus || null);
@@ -290,65 +293,6 @@ const ConsentDashboard = () => {
     }
   };
 
-  // Step 2: Check Status (Polling)
-  const checkStatus = useCallback(async () => {
-    if (!requestId) return;
-
-    try {
-      addLog('api', `GET /internal/aa/consents/request/${requestId} - Checking status...`);
-
-      const response = await fetch(`${API_BASE_URL}/internal/aa/consents/request/${requestId}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Failed to check status');
-      }
-
-      const consent = data.data;
-      const currentStatus = consent.status || 'PENDING';
-      
-      if (currentStatus !== status) {
-        addLog('success', `✅ Status updated: ${status} → ${currentStatus}`);
-        setStatus(currentStatus);
-      }
-
-      if (currentStatus === 'ACTIVE') {
-        setConsentId(consent.consent_id || 'N/A');
-        addLog('success', `🎉 Consent ACTIVE! Consent ID: ${consent.consent_id || 'N/A'}`);
-        addLog('webhook', `🔔 Webhook received: Status changed to ACTIVE`);
-        setStep(3);
-        // Update consentData with latest status
-        if (consentData) {
-          setConsentData({ ...consentData, status: 'ACTIVE', consent_id: consent.consent_id });
-        }
-      } else if (currentStatus === 'REJECTED' || currentStatus === 'REVOKED') {
-        addLog('error', `❌ Consent ${currentStatus}`);
-        setError(`Consent was ${currentStatus}`);
-      }
-    } catch (err) {
-      console.error('Error checking status:', err);
-      addLog('error', `❌ Status check failed: ${err.message}`);
-    }
-  }, [requestId, status, addLog, API_BASE_URL]);
-
-  // Auto-poll when on step 2 (resume polling if restored from localStorage)
-  useEffect(() => {
-    if (step === 2 && requestId && status !== 'ACTIVE' && status !== 'REJECTED' && status !== 'REVOKED') {
-      addLog('api', `🔄 Starting status polling for request_id: ${requestId}`);
-      const interval = setInterval(() => {
-        checkStatus();
-      }, 3000); // Poll every 3 seconds
-
-      return () => clearInterval(interval);
-    }
-  }, [step, requestId, status, checkStatus, addLog]);
-
   // Helper function to extract transactions from Saafe nested JSON structure
   // Specific structure: data.fi_details["IGNOSIS_FIP_UAT"][0].decrypted_data.Account...
   const extractTransactionsFromNestedJSON = (reportData) => {
@@ -376,11 +320,19 @@ const ConsentDashboard = () => {
               
               if (account) {
                 // Extract account number (mask it)
-                const accountNumber = account.accountNumber || 
+                const accountNumber = accountData.masked_account || 
+                                    account.accountNumber || 
                                     account.AccountNumber || 
                                     account.account_number || 
                                     account.maskedAccNumber ||
                                     'N/A';
+                
+                // Extract link reference number
+                const linkRefNumber = accountData.link_ref_number || 
+                                     account.link_ref_number ||
+                                     account.linkRefNumber ||
+                                     account.linkedAccRef ||
+                                     null;
                 
                 // Extract current balance from Summary
                 const summary = account.Summary || account.summary || {};
@@ -399,24 +351,25 @@ const ConsentDashboard = () => {
                 const holderName = holder.name || holder.Name || 'N/A';
                 
                 // Extract account type and IFSC
-                const accountType = account.accountType || account.AccountType || account.account_type || 'N/A';
+                const accountType = account.accountType || account.AccountType || account.account_type || account.accountSubType || 'N/A';
                 const ifsc = account.ifsc || account.IFSC || account.ifscCode || 'N/A';
                 
                 accounts.push({
                   fip_id: fipId,
                   account_number: accountNumber,
+                  link_ref_number: linkRefNumber,
                   masked_account_number: accountNumber ? 
                     `${accountNumber.toString().slice(0, 4)}XXXX${accountNumber.toString().slice(-4)}` : 
-                    'N/A',
+                    accountNumber,
                   account_type: accountType,
                   ifsc: ifsc,
                   balance: parseFloat(currentBalance),
                   currency: account.currency || account.Currency || 'INR',
-                  holder_name: holderName
+                  holder_name: holderName,
+                  source_url: accountData.source || null
                 });
 
                 // Extract transactions from Account.Transactions.Transaction array
-                // Saafe structure: Account.Transactions.Transaction[]
                 const transactionsData = account.Transactions || account.transactions || {};
                 const transactionArray = transactionsData.Transaction || 
                                       transactionsData.transaction || 
@@ -425,29 +378,41 @@ const ConsentDashboard = () => {
                 
                 if (Array.isArray(transactionArray) && transactionArray.length > 0) {
                   transactionArray.forEach(txn => {
-                    // Extract transaction details
-                    const txnDate = txn.date || txn.Date || txn.transactionDate || txn.transaction_date || 'N/A';
-                    const txnNarration = txn.narration || 
-                                     txn.Narration || 
-                                     txn.description || 
-                                     txn.Description || 
-                                     txn.remarks || 
-                                     txn.remark ||
-                                     'N/A';
+                    const isCredit = txn.type === 'CREDIT' || (txn.amount && parseFloat(txn.amount || txn.Amount || 0) >= 0);
                     const txnAmount = parseFloat(txn.amount || txn.Amount || 0);
-                    const txnBalance = parseFloat(txn.balance || txn.Balance || currentBalance || 0);
                     const txnType = txn.type || 
                                  txn.Type || 
-                                 (txnAmount >= 0 ? 'CREDIT' : 'DEBIT');
+                                 (isCredit ? 'CREDIT' : 'DEBIT');
                     
                     transactions.push({
                       fip_id: fipId,
                       account_number: accountNumber,
-                      date: txnDate,
-                      narration: txnNarration,
+                      date: txn.transactionTimestamp || 
+                           txn.valueDate || 
+                           txn.date || 
+                           txn.Date || 
+                           txn.transactionDate || 
+                           txn.transaction_date || 
+                           'N/A',
+                      transaction_timestamp: txn.transactionTimestamp || null,
+                      value_date: txn.valueDate || null,
+                      txn_id: txn.txnId || txn.txn_id || txn.id || null,
+                      narration: txn.narration || 
+                               txn.Narration || 
+                               txn.description || 
+                               txn.Description || 
+                               txn.remarks || 
+                               txn.remark ||
+                               'N/A',
                       amount: txnAmount,
                       type: txnType,
-                      balance: txnBalance
+                      balance: parseFloat(txn.transactionalBalance || 
+                                        txn.balance || 
+                                        txn.Balance || 
+                                        currentBalance || 
+                                        0),
+                      mode: txn.mode || txn.Mode || null,
+                      reference: txn.reference || txn.Reference || txn.ref || null
                     });
                   });
                 }
@@ -471,11 +436,245 @@ const ConsentDashboard = () => {
       }
     } catch (error) {
       console.error('Error extracting transactions:', error);
-      addLog('error', `⚠️ Error parsing transaction data: ${error.message}`);
     }
 
     return { transactions, accounts };
   };
+
+  // Step 4: Retrieve Report (moved before checkStatus to fix dependency order)
+  const handleRetrieveReport = useCallback(async (txnIdOverride = null) => {
+    // Ensure txnId is a string, not an object
+    let txnId = txnIdOverride || fiTxnId;
+    
+    // Convert to string if it's not already
+    if (txnId) {
+      if (typeof txnId === 'object' && txnId !== null) {
+        // If it's an object, try to extract the actual ID
+        // Handle React event objects or DOM elements
+        if (txnId.target && txnId.target.value) {
+          txnId = txnId.target.value;
+        } else if (txnId.currentTarget) {
+          // React synthetic event
+          txnId = null; // Don't use event object
+        } else {
+          txnId = txnId.txn_id || txnId.id || (txnId.toString && txnId.toString() !== '[object Object]' ? txnId.toString() : null);
+        }
+      } else if (typeof txnId !== 'string') {
+        txnId = String(txnId);
+      }
+    }
+    
+    // If txnId is still an object or invalid, try to get from fiTxnId state
+    if (!txnId || txnId === 'null' || txnId === 'undefined' || (typeof txnId === 'object' && txnId !== null)) {
+      // Fallback to fiTxnId state if override was invalid
+      if (!txnIdOverride && fiTxnId) {
+        txnId = typeof fiTxnId === 'string' ? fiTxnId : String(fiTxnId);
+      } else {
+        setError('Transaction ID is required to retrieve report');
+        return;
+      }
+    }
+
+    setRetrievingReport(true);
+    setError(null);
+    
+    // Log the txnId safely (ensure it's a string)
+    const txnIdForLog = typeof txnId === 'string' ? txnId : (txnId ? String(txnId) : 'N/A');
+    addLog('api', `POST /internal/aa/reports/retrieve - Retrieving report for txn_id: ${txnIdForLog}`);
+
+    try {
+      // Final safety check: Ensure txnId is a string for JSON.stringify
+      // This prevents "Converting circular structure to JSON" errors
+      let txnIdString = txnId;
+      if (typeof txnIdString !== 'string') {
+        if (txnIdString && typeof txnIdString === 'object') {
+          // If it's still an object, try to extract string value
+          txnIdString = txnIdString.txn_id || txnIdString.id || txnIdString.value || null;
+          if (!txnIdString || typeof txnIdString !== 'string') {
+            throw new Error('Invalid transaction ID: expected string but got object');
+          }
+        } else {
+          txnIdString = String(txnIdString);
+        }
+      }
+      
+      // Validate it's not empty or invalid
+      if (!txnIdString || txnIdString === 'null' || txnIdString === 'undefined' || txnIdString === '[object Object]') {
+        throw new Error('Invalid transaction ID provided');
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/internal/aa/reports/retrieve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          txn_id: txnIdString,
+          internal_user_id: userId,
+          report_type: 'json',
+          report_category: 'bank'
+        }),
+      });
+
+      const data = await parseJsonResponse(response);
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to retrieve report');
+      }
+
+      // Extract real data from response
+      const reportData = data.data?.report_data || data.data;
+      const { transactions, accounts } = extractTransactionsFromNestedJSON(reportData);
+      
+      // Store report data with extracted transactions
+      setReportData({
+        ...reportData,
+        extracted_transactions: transactions,
+        extracted_accounts: accounts
+      });
+      setReportId(data.data?.report_id || null);
+      setShowReport(true);
+      addLog('success', `✅ Report retrieved successfully! Found ${transactions.length} transactions`);
+    } catch (err) {
+      console.error('Error retrieving report:', err);
+      addLog('error', `❌ Report retrieval failed: ${err.message}`);
+      setError(err.message || 'Failed to retrieve report');
+    } finally {
+      setRetrievingReport(false);
+    }
+  }, [fiTxnId, userId, API_BASE_URL, addLog]);
+
+  // Step 2: Check Status (Polling)
+  const checkStatus = useCallback(async () => {
+    if (!requestId) return;
+
+    try {
+      // First, call Saafe API to check status (this updates the database)
+      addLog('api', `POST /internal/aa/consents/status-check - Checking status with Saafe API...`);
+      
+      const statusCheckResponse = await fetch(`${API_BASE_URL}/internal/aa/consents/status-check`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ request_id: requestId }),
+      });
+
+      const statusCheckData = await statusCheckResponse.json();
+      
+      if (statusCheckData.success && statusCheckData.data) {
+        const consentStatus = statusCheckData.data.consent_status;
+        const consentIdFromCheck = statusCheckData.data.consent_id;
+        
+        if (consentStatus && consentStatus !== status) {
+          addLog('success', `✅ Status updated via Saafe API: ${status} → ${consentStatus}`);
+          setStatus(consentStatus);
+        }
+        
+        if (consentIdFromCheck && !consentId) {
+          setConsentId(consentIdFromCheck);
+          addLog('success', `🎉 Consent ID received: ${consentIdFromCheck}`);
+        }
+      }
+
+      // Then, get the updated consent from database
+      addLog('api', `GET /internal/aa/consents/request/${requestId} - Fetching updated consent...`);
+
+      const response = await fetch(`${API_BASE_URL}/internal/aa/consents/request/${requestId}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to check status');
+      }
+
+      const consent = data.data;
+      const currentStatus = consent.status || 'PENDING';
+      
+      // Debug: Log the consent.txn_id to see its type
+      if (consent.txn_id) {
+        console.log('🔍 consent.txn_id type:', typeof consent.txn_id, 'value:', consent.txn_id);
+      }
+      
+      if (currentStatus !== status) {
+        addLog('success', `✅ Status updated: ${status} → ${currentStatus}`);
+        setStatus(currentStatus);
+      }
+
+      if (currentStatus === 'ACTIVE') {
+        setConsentId(consent.consent_id || 'N/A');
+        addLog('success', `🎉 Consent ACTIVE! Consent ID: ${consent.consent_id || 'N/A'}`);
+        addLog('webhook', `🔔 Status changed to ACTIVE`);
+        setStep(3);
+        // Update consentData with latest status
+        if (consentData) {
+          setConsentData({ ...consentData, status: 'ACTIVE', consent_id: consent.consent_id });
+        }
+      } else if (currentStatus === 'REJECTED' || currentStatus === 'REVOKED') {
+        addLog('error', `❌ Consent ${currentStatus}`);
+        setError(`Consent was ${currentStatus}`);
+      } else if (currentStatus === 'READY') {
+        addLog('success', `✅ Report is ready! Status: ${currentStatus}`);
+        if (consent.report_generated) {
+          addLog('info', `📊 Report has been generated`);
+          
+          // Automatically retrieve and display the report
+          const txnId = consent.txn_id;
+          // Ensure txnId is a string - handle all possible formats
+          let txnIdString = null;
+          if (txnId) {
+            if (typeof txnId === 'string') {
+              txnIdString = txnId;
+            } else if (typeof txnId === 'number') {
+              txnIdString = String(txnId);
+            } else if (Array.isArray(txnId) && txnId.length > 0) {
+              // Handle case where txn_id might be an array
+              txnIdString = String(txnId[0]);
+            } else if (typeof txnId === 'object' && txnId !== null) {
+              // Try to extract string value from object
+              txnIdString = txnId.txn_id || txnId.id || txnId.value || null;
+              if (txnIdString) {
+                txnIdString = String(txnIdString);
+              }
+            } else {
+              txnIdString = String(txnId);
+            }
+          }
+          
+          if (txnIdString && !showReport && !retrievingReport && !autoRetrieveTriggered) {
+            addLog('api', `🔄 Automatically retrieving report for txn_id: ${txnIdString}...`);
+            setFiTxnId(txnIdString); // Set txn_id for report retrieval
+            setAutoRetrieveTriggered(true); // Prevent multiple triggers
+            setStep(4); // Move to report viewer step
+            // Trigger report retrieval automatically
+            setTimeout(() => {
+              handleRetrieveReport(txnIdString);
+            }, 1000); // Small delay to ensure state is updated
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error checking status:', err);
+      addLog('error', `❌ Status check failed: ${err.message}`);
+    }
+  }, [requestId, status, consentId, addLog, API_BASE_URL, consentData, showReport, retrievingReport, handleRetrieveReport, autoRetrieveTriggered]);
+
+  // Auto-poll when on step 2 (resume polling if restored from localStorage)
+  useEffect(() => {
+    if (step === 2 && requestId && status !== 'ACTIVE' && status !== 'REJECTED' && status !== 'REVOKED') {
+      addLog('api', `🔄 Starting status polling for request_id: ${requestId}`);
+      const interval = setInterval(() => {
+        checkStatus();
+      }, 3000); // Poll every 3 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [step, requestId, status, checkStatus, addLog]);
 
   // Step 3: Fetch Data
   const handleFetchData = async () => {
@@ -507,8 +706,10 @@ const ConsentDashboard = () => {
       }
 
       const txnId = data.data?.txn_id || data.data?.transaction_id;
-      setFiTxnId(txnId);
-      addLog('success', `✅ Data fetch initiated! Transaction ID: ${txnId}`);
+      // Ensure txnId is a string
+      const txnIdString = txnId ? String(txnId) : null;
+      setFiTxnId(txnIdString);
+      addLog('success', `✅ Data fetch initiated! Transaction ID: ${txnIdString}`);
       addLog('webhook', `🔔 FI Request webhook will be received for txn_id: ${txnId}`);
       
       // Wait 5 seconds before retrieving report (give time for report to be generated)
@@ -589,60 +790,6 @@ const ConsentDashboard = () => {
       setError(err.message || 'Failed to fetch data');
     } finally {
       setFetchingData(false);
-    }
-  };
-
-  // Step 4: Retrieve Report
-  const handleRetrieveReport = async (txnIdOverride = null) => {
-    const txnId = txnIdOverride || fiTxnId;
-    if (!txnId) {
-      setError('Transaction ID is required to retrieve report');
-      return;
-    }
-
-    setRetrievingReport(true);
-    setError(null);
-    addLog('api', `POST /internal/aa/reports/retrieve - Retrieving report for txn_id: ${txnId}`);
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/internal/aa/reports/retrieve`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          txn_id: txnId,
-          internal_user_id: userId,
-          report_type: 'json',
-          report_category: 'bank'
-        }),
-      });
-
-      const data = await parseJsonResponse(response);
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Failed to retrieve report');
-      }
-
-      // Extract real data from response
-      const reportData = data.data?.report_data || data.data;
-      const { transactions, accounts } = extractTransactionsFromNestedJSON(reportData);
-      
-      // Store report data with extracted transactions
-      setReportData({
-        ...reportData,
-        extracted_transactions: transactions,
-        extracted_accounts: accounts
-      });
-      setReportId(data.data?.report_id || null);
-      setShowReport(true);
-      addLog('success', `✅ Report retrieved successfully! Found ${transactions.length} transactions`);
-    } catch (err) {
-      console.error('Error retrieving report:', err);
-      addLog('error', `❌ Report retrieval failed: ${err.message}`);
-      setError(err.message || 'Failed to retrieve report');
-    } finally {
-      setRetrievingReport(false);
     }
   };
 
@@ -986,14 +1133,38 @@ const ConsentDashboard = () => {
                       <div className="space-y-2 text-sm">
                         <div className="flex justify-between">
                           <span className="text-slate-400">Transaction ID:</span>
-                          <span className="text-emerald-400 font-mono font-bold">{fiTxnId}</span>
+                          <span className="text-emerald-400 font-mono font-bold">
+                            {fiTxnId && typeof fiTxnId === 'string' ? fiTxnId : (fiTxnId ? String(fiTxnId) : 'N/A')}
+                          </span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-400">Consent ID:</span>
-                          <span className="text-slate-300 font-mono">{consentId}</span>
+                          <span className="text-slate-300 font-mono">{consentId || 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Status:</span>
+                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                            status === 'READY' ? 'bg-emerald-500/20 text-emerald-400' :
+                            status === 'ACTIVE' ? 'bg-blue-500/20 text-blue-400' :
+                            'bg-yellow-500/20 text-yellow-400'
+                          }`}>
+                            {status}
+                          </span>
                         </div>
                       </div>
                     </div>
+
+                    {retrievingReport && (
+                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-4">
+                        <div className="flex items-center space-x-3">
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-emerald-400"></div>
+                          <div>
+                            <div className="text-emerald-400 font-semibold">Retrieving Report...</div>
+                            <div className="text-slate-400 text-xs">Fetching financial data from Saafe API</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {error && (
                       <div className="bg-red-900/20 border border-red-500/50 rounded p-3 text-red-400 text-sm">
@@ -1001,105 +1172,199 @@ const ConsentDashboard = () => {
                       </div>
                     )}
 
-                    <button
-                      onClick={handleRetrieveReport}
-                      disabled={retrievingReport || !fiTxnId}
-                      className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold py-3 px-6 rounded transition-all duration-200 shadow-lg shadow-emerald-500/20"
-                    >
-                      {retrievingReport ? 'Retrieving Report...' : 'Retrieve Report'}
-                    </button>
+                    {!retrievingReport && (
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          handleRetrieveReport();
+                        }}
+                        disabled={!fiTxnId}
+                        className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold py-3 px-6 rounded transition-all duration-200 shadow-lg shadow-emerald-500/20"
+                      >
+                        Retrieve Report
+                      </button>
+                    )}
                   </>
                 ) : (
                   <>
-                    {/* Report Summary */}
-                    {reportData?.summary && (
-                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-4">
-                        <h3 className="text-emerald-400 font-bold mb-3">Summary</h3>
-                        <div className="grid grid-cols-2 gap-4 text-sm">
-                          <div>
-                            <span className="text-slate-400">Total Credits:</span>
-                            <div className="text-emerald-400 font-bold">₹{reportData.summary.total_credits?.toLocaleString()}</div>
-                          </div>
-                          <div>
-                            <span className="text-slate-400">Total Debits:</span>
-                            <div className="text-red-400 font-bold">₹{reportData.summary.total_debits?.toLocaleString()}</div>
-                          </div>
-                          <div className="col-span-2">
-                            <span className="text-slate-400">Net Amount:</span>
-                            <div className="text-emerald-400 font-bold text-lg">₹{reportData.summary.net_amount?.toLocaleString()}</div>
+                    {/* Success Banner */}
+                    <div className="bg-gradient-to-r from-emerald-500/20 to-emerald-600/10 border border-emerald-500/50 rounded-lg p-4 mb-4">
+                      <div className="flex items-center space-x-3">
+                        <div className="text-2xl">✅</div>
+                        <div>
+                          <div className="text-emerald-400 font-bold">Report Retrieved Successfully!</div>
+                          <div className="text-slate-300 text-sm">
+                            {reportData?.extracted_transactions?.length || 0} transactions found across {' '}
+                            {reportData?.extracted_accounts?.length || 0} account(s)
                           </div>
                         </div>
                       </div>
-                    )}
+                    </div>
+
+                    {/* Report Summary */}
+                    {(() => {
+                      // Calculate summary from transactions if not provided
+                      const transactions = reportData?.extracted_transactions || [];
+                      const credits = transactions.filter(t => t.type === 'CREDIT' || (t.amount && t.amount >= 0));
+                      const debits = transactions.filter(t => t.type === 'DEBIT' || (t.amount && t.amount < 0));
+                      const totalCredits = credits.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+                      const totalDebits = debits.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+                      const netAmount = totalCredits - totalDebits;
+                      
+                      const summary = reportData?.summary || {
+                        total_credits: totalCredits,
+                        total_debits: totalDebits,
+                        net_amount: netAmount
+                      };
+                      
+                      return (
+                        <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/5 border border-emerald-500/30 rounded-lg p-5 shadow-lg">
+                          <h3 className="text-emerald-400 font-bold mb-4 text-lg">Financial Summary</h3>
+                          <div className="grid grid-cols-3 gap-4">
+                            <div className="bg-slate-900/50 rounded-lg p-3 border border-emerald-500/20">
+                              <div className="text-slate-400 text-xs mb-1">Total Credits</div>
+                              <div className="text-emerald-400 font-bold text-lg">
+                                ₹{summary.total_credits?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                              </div>
+                              <div className="text-emerald-500/60 text-xs mt-1">{credits.length} transactions</div>
+                            </div>
+                            <div className="bg-slate-900/50 rounded-lg p-3 border border-red-500/20">
+                              <div className="text-slate-400 text-xs mb-1">Total Debits</div>
+                              <div className="text-red-400 font-bold text-lg">
+                                ₹{summary.total_debits?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                              </div>
+                              <div className="text-red-500/60 text-xs mt-1">{debits.length} transactions</div>
+                            </div>
+                            <div className="bg-slate-900/50 rounded-lg p-3 border border-emerald-500/30">
+                              <div className="text-slate-400 text-xs mb-1">Net Amount</div>
+                              <div className={`font-bold text-xl ${
+                                netAmount >= 0 ? 'text-emerald-400' : 'text-red-400'
+                              }`}>
+                                {netAmount >= 0 ? '+' : ''}₹{Math.abs(netAmount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </div>
+                              <div className="text-slate-500 text-xs mt-1">{transactions.length} total</div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Account Details Summary Card */}
                     {(reportData?.extracted_accounts && reportData.extracted_accounts.length > 0) || 
                      (reportData?.fi_details && (Array.isArray(reportData.fi_details) ? reportData.fi_details.length > 0 : Object.keys(reportData.fi_details).length > 0)) ? (
-                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded p-4">
-                        <h3 className="text-emerald-400 font-bold mb-3">Account Summary</h3>
-                        {(reportData.extracted_accounts || []).map((account, idx) => (
-                          <div key={idx} className="space-y-2 text-sm mb-4 pb-4 border-b border-emerald-500/20 last:border-0">
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Account Holder:</span>
-                              <span className="text-slate-300 font-semibold">{account.holder_name || 'N/A'}</span>
+                      <div className="bg-gradient-to-br from-slate-900/50 to-slate-800/30 border border-emerald-500/30 rounded-lg p-5">
+                        <h3 className="text-emerald-400 font-bold mb-4 text-lg">Account Details</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {(reportData.extracted_accounts || []).map((account, idx) => (
+                            <div key={idx} className="bg-slate-950/50 border border-emerald-500/20 rounded-lg p-4 space-y-3">
+                              <div className="flex items-center justify-between pb-2 border-b border-emerald-500/20">
+                                <span className="text-slate-400 text-xs">Account #{idx + 1}</span>
+                                <span className="text-emerald-400 font-bold text-lg">
+                                  ₹{account.balance?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                                </span>
+                              </div>
+                              <div className="space-y-2 text-sm">
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Holder:</span>
+                                  <span className="text-slate-300 font-semibold">{account.holder_name || 'N/A'}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Account:</span>
+                                  <span className="text-slate-300 font-mono text-xs">
+                                    {account.masked_account_number || 
+                                     account.account_number || 
+                                     account.masked_account ||
+                                     'N/A'}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Type:</span>
+                                  <span className="text-slate-300 capitalize">{account.account_type || 'N/A'}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">IFSC:</span>
+                                  <span className="text-slate-300 font-mono text-xs">{account.ifsc || 'N/A'}</span>
+                                </div>
+                                {account.link_ref_number && (
+                                  <div className="flex justify-between">
+                                    <span className="text-slate-400">Link Ref:</span>
+                                    <span className="text-slate-300 font-mono text-xs truncate max-w-[150px]" title={account.link_ref_number}>
+                                      {account.link_ref_number}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Account Number:</span>
-                              <span className="text-slate-300 font-mono">
-                                {account.masked_account_number || 
-                                 (account.account_number ? 
-                                   `${account.account_number.toString().slice(0, 4)}XXXX${account.account_number.toString().slice(-4)}` : 
-                                   'N/A')}
-                              </span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Account Type:</span>
-                              <span className="text-slate-300 capitalize">{account.account_type || 'N/A'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">IFSC:</span>
-                              <span className="text-slate-300 font-mono">{account.ifsc || 'N/A'}</span>
-                            </div>
-                            <div className="flex justify-between items-center pt-2 border-t border-emerald-500/20">
-                              <span className="text-slate-400 font-semibold">Current Balance:</span>
-                              <span className="text-emerald-400 font-bold text-xl">₹{account.balance?.toLocaleString('en-IN', { minimumFractionDigits: 2 }) || '0.00'}</span>
-                            </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
                     ) : null}
 
                     {/* Transactions Table */}
                     {reportData?.extracted_transactions && reportData.extracted_transactions.length > 0 ? (
                       <div className="bg-slate-950 border border-emerald-500/30 rounded p-4">
-                        <h3 className="text-emerald-400 font-bold mb-3">
-                          Transactions ({reportData.extracted_transactions.length})
-                        </h3>
-                        <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                        <div className="flex justify-between items-center mb-3">
+                          <h3 className="text-emerald-400 font-bold">
+                            Transactions ({reportData.extracted_transactions.length})
+                          </h3>
+                          <div className="text-xs text-slate-400">
+                            {reportData.extracted_transactions.filter(t => t.type === 'CREDIT' || (t.amount && t.amount >= 0)).length} Credits • {' '}
+                            {reportData.extracted_transactions.filter(t => t.type === 'DEBIT' || (t.amount && t.amount < 0)).length} Debits
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto max-h-[500px] overflow-y-auto border border-emerald-500/20 rounded">
                           <table className="w-full text-xs">
-                            <thead className="sticky top-0 bg-slate-950">
+                            <thead className="sticky top-0 bg-slate-900 z-10">
                               <tr className="border-b border-emerald-500/30">
-                                <th className="text-left py-2 px-2 text-slate-400">Date</th>
-                                <th className="text-left py-2 px-2 text-slate-400">Narration</th>
-                                <th className="text-right py-2 px-2 text-slate-400">Amount</th>
-                                <th className="text-right py-2 px-2 text-slate-400">Balance</th>
+                                <th className="text-left py-3 px-3 text-slate-300 font-semibold">Date</th>
+                                <th className="text-left py-3 px-3 text-slate-300 font-semibold">Narration</th>
+                                <th className="text-left py-3 px-3 text-slate-300 font-semibold">Reference</th>
+                                <th className="text-right py-3 px-3 text-slate-300 font-semibold">Amount</th>
+                                <th className="text-right py-3 px-3 text-slate-300 font-semibold">Balance</th>
+                                <th className="text-center py-3 px-3 text-slate-300 font-semibold">Type</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {reportData.extracted_transactions.map((txn, idx) => (
-                                <tr key={idx} className="border-b border-slate-800 hover:bg-slate-900/50">
-                                  <td className="py-2 px-2 text-slate-300">{txn.date || 'N/A'}</td>
-                                  <td className="py-2 px-2 text-slate-300 max-w-xs truncate" title={txn.narration || 'N/A'}>
-                                    {txn.narration || txn.description || 'N/A'}
-                                  </td>
-                                  <td className={`py-2 px-2 text-right font-mono font-semibold ${
-                                    txn.type === 'CREDIT' || (txn.amount && txn.amount >= 0) ? 'text-emerald-400' : 'text-red-400'
-                                  }`}>
-                                    {txn.type === 'CREDIT' || (txn.amount && txn.amount >= 0) ? '+' : '-'}₹{Math.abs(txn.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                                  </td>
-                                  <td className="py-2 px-2 text-right text-slate-300 font-mono">₹{(txn.balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                                </tr>
-                              ))}
+                              {reportData.extracted_transactions.map((txn, idx) => {
+                                const isCredit = txn.type === 'CREDIT' || (txn.amount && txn.amount >= 0);
+                                const dateStr = txn.date || txn.transaction_timestamp || txn.value_date || 'N/A';
+                                const formattedDate = dateStr !== 'N/A' && dateStr.includes('T') 
+                                  ? new Date(dateStr).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                                  : dateStr;
+                                
+                                return (
+                                  <tr key={idx} className="border-b border-slate-800/50 hover:bg-slate-900/70 transition-colors">
+                                    <td className="py-2.5 px-3 text-slate-300 font-mono text-xs whitespace-nowrap">
+                                      {formattedDate}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-300 max-w-md">
+                                      <div className="truncate" title={txn.narration || txn.description || 'N/A'}>
+                                        {txn.narration || txn.description || 'N/A'}
+                                      </div>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-400 font-mono text-xs">
+                                      {txn.reference || txn.txn_id || '-'}
+                                    </td>
+                                    <td className={`py-2.5 px-3 text-right font-mono font-semibold whitespace-nowrap ${
+                                      isCredit ? 'text-emerald-400' : 'text-red-400'
+                                    }`}>
+                                      {isCredit ? '+' : '-'}₹{Math.abs(txn.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right text-slate-300 font-mono whitespace-nowrap">
+                                      ₹{(txn.balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-center">
+                                      <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                                        isCredit 
+                                          ? 'bg-emerald-500/20 text-emerald-400' 
+                                          : 'bg-red-500/20 text-red-400'
+                                      }`}>
+                                        {isCredit ? 'CREDIT' : 'DEBIT'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
